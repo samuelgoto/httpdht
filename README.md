@@ -1,4 +1,4 @@
 httpdht
 =======
 
-dht over http
+This is an implementation of a DHT for nodes talking over HTTP.
