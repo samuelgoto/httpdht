@@ -28,7 +28,7 @@ public class Modules {
                 Key injectorKey = Key.get(Injector.class);
                 Key stageKey = Key.get(Stage.class);
                 
-                for(Map.Entry<Key<?>, Binding<?>> entry : parent.getAllBindings().entrySet()) {
+                for(Map.Entry<Key<?>, Binding<?>> entry : parent.getBindings().entrySet()) {
                     Key key = entry.getKey();
                     Binding<?> binding = entry.getValue();
                     Scope scope = MoreScopes.getLinkedScope(binding);

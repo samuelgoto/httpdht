@@ -226,7 +226,7 @@ public class InspectionUtils {
             
             // check if this is an enclosed class
             if (data.lookupClass == null) {
-                if(!injector.getAllBindings().containsKey(Key.get(data.actualClass))) {
+                if(!injector.getBindings().containsKey(Key.get(data.actualClass))) {
                     throw new InspectionException("no existing binding for class: " + data.actualClass);
                 }
                 Binding<?> binding = injector.getBinding(data.actualClass);
@@ -234,7 +234,7 @@ public class InspectionUtils {
                 data.fieldContainerInstance = binding.getProvider().get();
             } else {            
                 // inner classes must be annotated properly
-                if(!injector.getAllBindings().containsKey(Key.get(data.lookupClass))) {
+                if(!injector.getBindings().containsKey(Key.get(data.lookupClass))) {
                     throw new InspectionException("no existing binding for class: " + data.lookupClass);
                 }
                 Binding<?> binding = injector.getBinding(data.lookupClass);

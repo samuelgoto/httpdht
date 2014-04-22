@@ -43,7 +43,7 @@ public class GuiceUtils {
      * within a module.
      */
     public static void loadEagerSingletons(Injector injector) {
-        Map<Key<?>, Binding<?>> map = injector.getAllBindings();
+        Map<Key<?>, Binding<?>> map = injector.getBindings();
         for(Binding<?> binding : map.values()) {
             if(binding.acceptScopingVisitor(eagerScopingVisitor)) {
                 binding.getProvider().get();
