@@ -35,7 +35,6 @@ import org.limewire.mojito.util.ContactUtils;
 import org.limewire.mojito.util.DatabaseUtils;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
