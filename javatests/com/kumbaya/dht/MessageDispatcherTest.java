@@ -1,5 +1,7 @@
 package com.kumbaya.dht;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
@@ -7,10 +9,22 @@ import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
 import org.easymock.Capture;
 import org.easymock.EasyMock;
 import org.easymock.IAnswer;
 import org.easymock.IMocksControl;
+import org.eclipse.jetty.client.Address;
+import org.eclipse.jetty.client.HttpClient;
+import org.eclipse.jetty.client.HttpExchange;
+import org.eclipse.jetty.io.ByteArrayBuffer;
+import org.eclipse.jetty.server.Handler;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.handler.AbstractHandler;
 import org.junit.Before;
 import org.junit.Test;
 import org.limewire.io.SimpleNetworkInstanceUtils;
@@ -146,7 +160,7 @@ public class MessageDispatcherTest {
 	}
 
 	@Test
-	public void testBootstrapingANodeAndStoringAValue() throws Exception {
+	public void testBootstrapingANodeAndStoringAValueWithMockBootstrap() throws Exception {
 		MojitoDHT node = MojitoFactory.createDHT("local test node");
 
 		HttpMessageDispatcher httpMessageDispatcher = messageFactory(
@@ -245,26 +259,26 @@ public class MessageDispatcherTest {
 	}
 
 	@Test
-	public void testDHT() throws Exception {
+	public void testDHTWithMockDispatchers() throws Exception {
 		final Context dht = (Context) MojitoFactory.createDHT("bootstrap");
 		final Context node = (Context) MojitoFactory.createDHT("node");
 
 		final InetSocketAddress dhtIp = new InetSocketAddress("localhost", 8080);
 		final InetSocketAddress nodeIp = new InetSocketAddress("localhost", 8081);
-		
+
 		final HttpMessageDispatcher httpMessageDispatcher = messageFactory(
 				dht);
-		
+
 		MessageDispatcherFactory messageFactory2 = control.createMock(
 				MessageDispatcherFactory.class);
 		Dispatcher messageDispatcher2 = control.createMock(
 				Dispatcher.class);
-		
+
 		final HttpMessageDispatcher httpMessageDispatcher2 = new HttpMessageDispatcher(
 				(Context) node, messageDispatcher2);
 		expect(messageFactory2.create(isA(Context.class))).andReturn(
 				httpMessageDispatcher2);
-		
+
 		messageDispatcher.bind(isA(SocketAddress.class));
 		messageDispatcher2.bind(isA(SocketAddress.class));
 
@@ -290,11 +304,11 @@ public class MessageDispatcherTest {
 						}
 					}
 				});
-				
+
 				return true;
 			}
 		}).anyTimes();
-		
+
 		final Capture<Tag> tag2 = new Capture<Tag>();
 		expect(messageDispatcher2.submit(capture(tag2))).andAnswer(new IAnswer<Boolean>() {
 			@Override
@@ -302,7 +316,7 @@ public class MessageDispatcherTest {
 				DHTMessage source = tag2.getValue().getMessage();
 				final ByteBuffer data = node.getMessageFactory()
 						.writeMessage(dhtIp, source);
-				
+
 				// the data gets transmitted over the wire.
 				dht.getDHTExecutorService().execute(new Runnable() {
 					@Override
@@ -319,9 +333,9 @@ public class MessageDispatcherTest {
 				return true;
 			}
 		}).anyTimes();
-		
+
 		control.replay();
-		
+
 		dht.setMessageDispatcher(messageFactory);
 		dht.bind(dhtIp);
 		dht.start();
@@ -330,6 +344,150 @@ public class MessageDispatcherTest {
 		node.bind(nodeIp);
 		node.start();
 		node.bootstrap(dhtIp).get();
+		assertTrue(node.isBootstrapped());
+
+		DHTValueImpl value = new DHTValueImpl(
+				DHTValueType.TEXT, Version.ZERO, "hello world".getBytes());
+
+		node.put(Keys.of("key"), value).get();
+
+		FindValueResult result = node.get(EntityKey.createEntityKey(
+				Keys.of("key"), DHTValueType.TEXT)).get();
+
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.getEntities().size());
+		assertEquals("hello world",
+				new String(result.getEntities().iterator().next().getValue().getValue()));
+
+		node.close();
+		dht.close();
+	}
+
+	private static class ByteArrayDispatcher implements Dispatcher {
+		private final Context context;
+		private final HttpClient client = new HttpClient();
+		private Server server;
+		private HttpMessageDispatcher dispatcher;
+
+		ByteArrayDispatcher(Context context) {
+			this.context = context;
+			client.setConnectorType(HttpClient.CONNECTOR_SELECT_CHANNEL);
+		}
+		
+		public ByteArrayDispatcher setDispatcher(HttpMessageDispatcher dispatcher) {
+			this.dispatcher = dispatcher;
+			return this;
+		}
+
+		@Override
+		public void bind(SocketAddress address) throws IOException {
+			server = new Server(((InetSocketAddress) address).getPort());
+
+			server.setHandler(new AbstractHandler() {
+				@Override
+				public void handle(String target, Request baseRequest,
+						HttpServletRequest request, HttpServletResponse response)
+						throws IOException, ServletException {
+					int length = request.getContentLength();
+					byte[] data = new byte[length];
+					DataInputStream dataIs = new DataInputStream(
+							request.getInputStream());
+					dataIs.readFully(data);
+
+					String ip = request.getHeader("X-Node-IP");
+					String port = request.getHeader("X-Node-Port");
+					InetSocketAddress src = new InetSocketAddress(ip,
+							Integer.valueOf(port)); 
+
+					DHTMessage destination = context.getMessageFactory()
+							.createMessage(src, ByteBuffer.wrap(data));
+					dispatcher.handleMessage(destination);
+				}
+			});
+						
+			try {
+				server.start();
+				client.start();
+			} catch (InterruptedException e) {
+				throw new IOException(e);
+			} catch (Exception e) {
+				throw new IOException(e);
+			}
+		}
+
+		@Override
+		public boolean submit(Tag tag) {
+			HttpExchange request = new HttpExchange() {
+			    protected void onResponseComplete() throws IOException {
+			        int status = getStatus();
+			        if (status == 200) {
+			        	
+			        }
+			    }
+			};
+			 
+			// Optionally set the HTTP method
+			request.setMethod("POST");
+			InetSocketAddress ip = (InetSocketAddress) tag.getMessage().getContact()
+					.getContactAddress();
+			request.setAddress(new Address(ip.getAddress().getHostAddress(),
+					ip.getPort()));
+			request.setURI("/");
+
+			// TODO(goto): figure out what's the best way to do this.
+			request.addRequestHeader("X-Node-IP",
+					((InetSocketAddress) context.getContactAddress()).getAddress().getHostAddress());
+			request.addRequestHeader("X-Node-Port",
+					String.valueOf(((InetSocketAddress) context.getContactAddress()).getPort()));
+			
+			try {
+				DHTMessage message = tag.getMessage();
+				ByteBuffer data = context.getMessageFactory()
+						.writeMessage(ip, message);
+				
+				request.setRequestContent(new ByteArrayBuffer(data.array()));
+
+				client.send(request);
+				return true;
+			} catch (IOException e) {
+				e.printStackTrace();
+				return false;
+			}
+		}
+
+		@Override
+		public void verify(SecureMessage secureMessage,
+				SecureMessageCallback smc) {
+			throw new UnsupportedOperationException(
+					"Dispatcher doesn't support verifying secure messages");
+		}
+	}
+
+	static class MessageDispatcherFactoryImpl implements MessageDispatcherFactory {
+		@Override
+		public MessageDispatcher create(Context context) {
+			ByteArrayDispatcher dispatcher = new ByteArrayDispatcher(context);
+			HttpMessageDispatcher result = new HttpMessageDispatcher(context,
+					dispatcher);
+			dispatcher.setDispatcher(result);
+			return result;
+		}
+	}
+
+	@Test
+	public void testDHTWithByteArrayDispatchers() throws Exception {
+		control.replay();
+
+		Context dht = (Context) MojitoFactory.createDHT("bootstrap");
+		Context node = (Context) MojitoFactory.createDHT("node");
+		dht.setMessageDispatcher(new MessageDispatcherFactoryImpl());
+		dht.bind(new InetSocketAddress("localhost", 8080));
+		dht.start();
+
+		node.setMessageDispatcher(new MessageDispatcherFactoryImpl());
+		node.bind(new InetSocketAddress("localhost", 8081));
+		node.start();
+		node.bootstrap(new InetSocketAddress("localhost", 8080)).get();
 		assertTrue(node.isBootstrapped());
 
 		DHTValueImpl value = new DHTValueImpl(
