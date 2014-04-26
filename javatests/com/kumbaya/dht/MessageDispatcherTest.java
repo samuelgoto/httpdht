@@ -16,7 +16,9 @@ import org.limewire.mojito.Context;
 import org.limewire.mojito.KUID;
 import org.limewire.mojito.MojitoDHT;
 import org.limewire.mojito.MojitoFactory;
+import org.limewire.mojito.StatusCode;
 import org.limewire.mojito.concurrent.DHTFuture;
+import org.limewire.mojito.db.DHTValue;
 import org.limewire.mojito.io.MessageDispatcher;
 import org.limewire.mojito.io.MessageDispatcherFactory;
 import org.limewire.mojito.io.MessageInputStream;
@@ -26,10 +28,14 @@ import org.limewire.mojito.messages.FindNodeRequest;
 import org.limewire.mojito.messages.FindNodeResponse;
 import org.limewire.mojito.messages.PingRequest;
 import org.limewire.mojito.messages.PingResponse;
+import org.limewire.mojito.messages.StoreRequest;
+import org.limewire.mojito.messages.StoreResponse;
 import org.limewire.mojito.messages.impl.FindNodeResponseImpl;
 import org.limewire.mojito.messages.impl.PingResponseImpl;
+import org.limewire.mojito.messages.impl.StoreResponseImpl;
 import org.limewire.mojito.result.BootstrapResult;
 import org.limewire.mojito.result.BootstrapResult.ResultType;
+import org.limewire.mojito.result.StoreResult;
 import org.limewire.mojito.routing.Contact;
 import org.limewire.mojito.routing.Contact.State;
 import org.limewire.mojito.routing.Vendor;
@@ -40,10 +46,13 @@ import org.limewire.mojito.util.ContactUtils;
 import org.limewire.security.SecureMessage;
 import org.limewire.security.SecureMessageCallback;
 
+import com.google.common.collect.ImmutableSet;
+
 import static org.easymock.EasyMock.capture;
 import static org.easymock.EasyMock.expect;
 import static org.easymock.EasyMock.isA;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class MessageDispatcherTest {
 	private IMocksControl control = EasyMock.createControl();
@@ -51,7 +60,6 @@ public class MessageDispatcherTest {
 			MessageDispatcherFactory.class);
 	Dispatcher messageDispatcher = control.createMock(
 			Dispatcher.class);
-    MessageInputStream in = control.createMock(MessageInputStream.class);
 
 	@Before
 	public void setUp() {
@@ -130,7 +138,7 @@ public class MessageDispatcherTest {
 	}
 
 	@Test
-	public void testBootstrapingANode() throws Exception {
+	public void testBootstrapingANodeAndStoringAValue() throws Exception {
 	    MojitoDHT node = MojitoFactory.createDHT("local test node");
 
 	    HttpMessageDispatcher httpMessageDispatcher = messageFactory(
@@ -140,11 +148,21 @@ public class MessageDispatcherTest {
 		messageDispatcher.bind(isA(SocketAddress.class));
 		expect(messageDispatcher.isBound()).andReturn(true);
 		
+		// While bootstraping, the node pings and sends a find node request
+		// to the bootstrap node.
 		Capture<Tag> pingRequestTag = new Capture<Tag>();
 		expect(messageDispatcher.submit(capture(pingRequestTag))).andReturn(true);
 		
 		Capture<Tag> findNodeRequestTag = new Capture<Tag>();
 		expect(messageDispatcher.submit(capture(findNodeRequestTag))).andReturn(true);
+		
+		// While storing a result, the node sends a find node request,
+		// to which the bootstrap node replies.
+		Capture<Tag> findNodeRequestTag2 = new Capture<Tag>();
+		expect(messageDispatcher.submit(capture(findNodeRequestTag2))).andReturn(true);
+		
+		Capture<Tag> storeRequestTag = new Capture<Tag>();
+		expect(messageDispatcher.submit(capture(storeRequestTag))).andReturn(true);
 		
 		control.replay();
 		
@@ -187,5 +205,36 @@ public class MessageDispatcherTest {
 	    Thread.sleep(200);
 	    
 	    assertEquals(ResultType.BOOTSTRAP_SUCCEEDED, result.get().getResultType());
+	    
+	    assertTrue(node.isBootstrapped());
+	    
+	    DHTFuture<StoreResult> storeResult = node.put(
+	    		Keys.of("foo"), Values.of("bar"));
+	    
+	    Thread.sleep(200);
+	    
+	    FindNodeRequest findNodeRequest2 = (FindNodeRequest) findNodeRequestTag2.getValue().getMessage();
+	    
+	    FindNodeResponse findNodeResponse2 = new FindNodeResponseImpl(
+	    		(Context) node, contact, findNodeRequest2.getMessageID(), 
+	    		null, Collections.<Contact>emptySet());
+
+	    Thread.sleep(200);
+
+	    httpMessageDispatcher.handleMessage(findNodeResponse2);
+
+	    StoreRequest storeRequest = (StoreRequest) storeRequestTag.getValue().getMessage();
+
+	    StoreResponse storeResponse = new StoreResponseImpl(
+	    		(Context) node, contact, storeRequest.getMessageID(),
+	    		ImmutableSet.of(new StoreResponse.StoreStatusCode(
+	    				Keys.of("foo"), ((Context) node).getLocalNodeID(), 
+	    				StoreResponse.OK)));
+	    
+	    httpMessageDispatcher.handleMessage(storeResponse);
+	    
+	    assertEquals(1, storeResult.get().getValues().size());
+	    assertEquals(Values.of("bar"),
+	    		storeResult.get().getValues().iterator().next().getValue());
 	}
 }
