@@ -17,6 +17,7 @@ import org.eclipse.jetty.io.ByteArrayBuffer;
 import org.eclipse.jetty.server.Request;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.eclipse.jetty.server.handler.ContextHandler;
 import org.limewire.mojito.Context;
 import org.limewire.mojito.io.Tag;
 import org.limewire.mojito.messages.DHTMessage;
@@ -39,36 +40,63 @@ class JettyMessageDispatcher implements Dispatcher {
 		return this;
 	}
 
+	static class IndexHandler extends AbstractHandler {
+		@Override
+		public void handle(String target, Request baseRequest,
+				HttpServletRequest request, HttpServletResponse response)
+				throws IOException, ServletException {
+			response.getWriter().write("Welcome to the DHT!");
+			response.flushBuffer();
+		}
+	}
+	
+	static class DhtHandler extends AbstractHandler {
+		private final Context context;
+		private HttpMessageDispatcher dispatcher;
+
+		DhtHandler(Context context, HttpMessageDispatcher dispatcher) {
+			this.context = context;
+			this.dispatcher = dispatcher;
+		}
+		
+		@Override
+		public void handle(String target, Request baseRequest,
+				HttpServletRequest request, HttpServletResponse response)
+				throws IOException, ServletException {
+			int length = request.getContentLength();
+			byte[] data = new byte[length];
+			DataInputStream dataIs = new DataInputStream(
+					request.getInputStream());
+			dataIs.readFully(data);
+
+			String ip = request.getHeader("X-Node-IP");
+			String port = request.getHeader("X-Node-Port");
+
+			InetSocketAddress src = new InetSocketAddress(ip,
+					Integer.valueOf(port)); 
+
+			DHTMessage destination = context.getMessageFactory()
+					.createMessage(src, ByteBuffer.wrap(data));
+
+			dispatcher.handleMessage(destination);
+		}
+	}
+	
 	@Override
 	public void bind(SocketAddress address) throws IOException {
 		server = new Server(((InetSocketAddress) address).getPort());
 
-		server.setHandler(new AbstractHandler() {
-			@Override
-			public void handle(String target, Request baseRequest,
-					HttpServletRequest request, HttpServletResponse response)
-					throws IOException, ServletException {
-				int length = request.getContentLength();
-				byte[] data = new byte[length];
-				DataInputStream dataIs = new DataInputStream(
-						request.getInputStream());
-				dataIs.readFully(data);
+		ContextHandler servlet = new ContextHandler("/.well-known/dht");
+        servlet.setContextPath("/");
+        servlet.setResourceBase(".");
+        servlet.setClassLoader(Thread.currentThread().getContextClassLoader());
+        servlet.setHandler(new DhtHandler(context, dispatcher));
+        server.setHandler(servlet);
 
-				String ip = request.getHeader("X-Node-IP");
-				String port = request.getHeader("X-Node-Port");
-				InetSocketAddress src = new InetSocketAddress(ip,
-						Integer.valueOf(port)); 
+		ContextHandler home = new ContextHandler("/");
+		home.setHandler(new IndexHandler());
+        server.setHandler(home);
 
-				DHTMessage destination = context.getMessageFactory()
-						.createMessage(src, ByteBuffer.wrap(data));
-
-				// System.out.println("received:");
-				// System.out.println(destination);
-
-				dispatcher.handleMessage(destination);
-			}
-		});
-					
 		try {
 			server.start();
 			client.start();
@@ -81,8 +109,6 @@ class JettyMessageDispatcher implements Dispatcher {
 
 	@Override
 	public boolean submit(Tag tag) {
-		// System.out.println("sending:");
-		// System.out.println(tag);
 		HttpExchange request = new HttpExchange() {
 		    protected void onResponseComplete() throws IOException {
 		        int status = getStatus();
@@ -99,7 +125,7 @@ class JettyMessageDispatcher implements Dispatcher {
 		request.setAddress(new Address(ip.getAddress().getHostAddress(),
 				ip.getPort()));
 
-		request.setURI("/");
+		request.setURI("/.well-known/dht");
 
 		// TODO(goto): figure out what's the best way to do this.
 		request.addRequestHeader("X-Node-IP",
