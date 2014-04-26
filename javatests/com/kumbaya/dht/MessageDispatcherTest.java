@@ -4,21 +4,26 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.ByteBuffer;
 import java.util.Collections;
 
 import org.easymock.Capture;
 import org.easymock.EasyMock;
+import org.easymock.IAnswer;
 import org.easymock.IMocksControl;
 import org.junit.Before;
 import org.junit.Test;
 import org.limewire.io.SimpleNetworkInstanceUtils;
 import org.limewire.mojito.Context;
+import org.limewire.mojito.EntityKey;
 import org.limewire.mojito.KUID;
 import org.limewire.mojito.MojitoDHT;
 import org.limewire.mojito.MojitoFactory;
 import org.limewire.mojito.StatusCode;
 import org.limewire.mojito.concurrent.DHTFuture;
 import org.limewire.mojito.db.DHTValue;
+import org.limewire.mojito.db.DHTValueType;
+import org.limewire.mojito.db.impl.DHTValueImpl;
 import org.limewire.mojito.io.MessageDispatcher;
 import org.limewire.mojito.io.MessageDispatcherFactory;
 import org.limewire.mojito.io.MessageInputStream;
@@ -26,6 +31,7 @@ import org.limewire.mojito.io.Tag;
 import org.limewire.mojito.messages.DHTMessage;
 import org.limewire.mojito.messages.FindNodeRequest;
 import org.limewire.mojito.messages.FindNodeResponse;
+import org.limewire.mojito.messages.MessageFormatException;
 import org.limewire.mojito.messages.PingRequest;
 import org.limewire.mojito.messages.PingResponse;
 import org.limewire.mojito.messages.StoreRequest;
@@ -34,6 +40,7 @@ import org.limewire.mojito.messages.impl.FindNodeResponseImpl;
 import org.limewire.mojito.messages.impl.PingResponseImpl;
 import org.limewire.mojito.messages.impl.StoreResponseImpl;
 import org.limewire.mojito.result.BootstrapResult;
+import org.limewire.mojito.result.FindValueResult;
 import org.limewire.mojito.result.BootstrapResult.ResultType;
 import org.limewire.mojito.result.StoreResult;
 import org.limewire.mojito.routing.Contact;
@@ -68,15 +75,15 @@ public class MessageDispatcherTest {
 		NetworkSettings.FILTER_CLASS_C.setValue(false);
 		ContactUtils.setNetworkInstanceUtils(new SimpleNetworkInstanceUtils(false));
 	}
-	
+
 	interface Dispatcher {
 		public void bind(SocketAddress address) throws IOException;
-		public boolean isBound();
 		boolean submit(Tag tag);
 		void verify(SecureMessage secureMessage, SecureMessageCallback smc);
 	}
 
 	static class HttpMessageDispatcher extends MessageDispatcher {
+		private boolean isBound = false;
 		private boolean started = false;
 		private final Dispatcher dispatcher;
 
@@ -84,20 +91,21 @@ public class MessageDispatcherTest {
 			super(context);
 			this.dispatcher = dispatcher;
 		}
-		
+
 		@Override
-	    public void handleMessage(DHTMessage message) {
+		public void handleMessage(DHTMessage message) {
 			super.handleMessage(message);
 		}
 
 		@Override
 		public void bind(SocketAddress address) throws IOException {
 			dispatcher.bind(address);
+			isBound = true;
 		}
 
 		@Override
 		public boolean isBound() {
-			return dispatcher.isBound();
+			return isBound;
 		}
 
 		@Override
@@ -128,113 +136,216 @@ public class MessageDispatcherTest {
 			dispatcher.verify(secureMessage, smc);
 		}
 	}
-	
+
 	private HttpMessageDispatcher messageFactory(MojitoDHT node) {
-	    HttpMessageDispatcher httpMessageDispatcher = new HttpMessageDispatcher(
-	    		(Context) node, messageDispatcher);
-	    expect(messageFactory.create(isA(Context.class))).andReturn(
-	    		httpMessageDispatcher);
-	    return httpMessageDispatcher;
+		HttpMessageDispatcher httpMessageDispatcher = new HttpMessageDispatcher(
+				(Context) node, messageDispatcher);
+		expect(messageFactory.create(isA(Context.class))).andReturn(
+				httpMessageDispatcher);
+		return httpMessageDispatcher;
 	}
 
 	@Test
 	public void testBootstrapingANodeAndStoringAValue() throws Exception {
-	    MojitoDHT node = MojitoFactory.createDHT("local test node");
+		MojitoDHT node = MojitoFactory.createDHT("local test node");
 
-	    HttpMessageDispatcher httpMessageDispatcher = messageFactory(
-	    		node);
-		
-		expect(messageDispatcher.isBound()).andReturn(false);
+		HttpMessageDispatcher httpMessageDispatcher = messageFactory(
+				node);
+
 		messageDispatcher.bind(isA(SocketAddress.class));
-		expect(messageDispatcher.isBound()).andReturn(true);
-		
+
 		// While bootstraping, the node pings and sends a find node request
 		// to the bootstrap node.
 		Capture<Tag> pingRequestTag = new Capture<Tag>();
 		expect(messageDispatcher.submit(capture(pingRequestTag))).andReturn(true);
-		
+
 		Capture<Tag> findNodeRequestTag = new Capture<Tag>();
 		expect(messageDispatcher.submit(capture(findNodeRequestTag))).andReturn(true);
-		
+
 		// While storing a result, the node sends a find node request,
 		// to which the bootstrap node replies.
 		Capture<Tag> findNodeRequestTag2 = new Capture<Tag>();
 		expect(messageDispatcher.submit(capture(findNodeRequestTag2))).andReturn(true);
-		
+
 		Capture<Tag> storeRequestTag = new Capture<Tag>();
 		expect(messageDispatcher.submit(capture(storeRequestTag))).andReturn(true);
+
+		control.replay();
+
+		node.setMessageDispatcher(messageFactory);
+		InetSocketAddress local = new InetSocketAddress("localhost", 8081);
+		node.bind(local);
+		node.start();
+		InetSocketAddress bootstrap = new InetSocketAddress("localhost", 8080);
+		DHTFuture<BootstrapResult> result = node.bootstrap(bootstrap);
+
+		// Allows the message executor to catch up.
+		Thread.sleep(200);
+
+		PingRequest pingRequest = (PingRequest) pingRequestTag.getValue().getMessage();
+
+		Contact contact = new RemoteContact(
+				bootstrap,
+				Vendor.UNKNOWN, Version.ZERO, 
+				KUID.createRandomID(),
+				bootstrap, 
+				1, 0, State.ALIVE);
+
+		PingResponse pingResponse = new PingResponseImpl(
+				(Context) node, contact, pingRequest.getMessageID(), 
+				local, 
+				BigInteger.ONE);
+
+		httpMessageDispatcher.handleMessage(pingResponse);
+
+		Thread.sleep(200);
+
+		FindNodeRequest findNodeRequest = (FindNodeRequest) findNodeRequestTag.getValue().getMessage();
+
+		FindNodeResponse findNodeResponse = new FindNodeResponseImpl(
+				(Context) node, contact, findNodeRequest.getMessageID(), 
+				null, Collections.<Contact>emptySet());
+
+		httpMessageDispatcher.handleMessage(findNodeResponse);
+
+		Thread.sleep(200);
+
+		assertEquals(ResultType.BOOTSTRAP_SUCCEEDED, result.get().getResultType());
+
+		assertTrue(node.isBootstrapped());
+
+		DHTFuture<StoreResult> storeResult = node.put(
+				Keys.of("foo"), Values.of("bar"));
+
+		Thread.sleep(200);
+
+		FindNodeRequest findNodeRequest2 = (FindNodeRequest) findNodeRequestTag2.getValue().getMessage();
+
+		FindNodeResponse findNodeResponse2 = new FindNodeResponseImpl(
+				(Context) node, contact, findNodeRequest2.getMessageID(), 
+				null, Collections.<Contact>emptySet());
+
+		Thread.sleep(200);
+
+		httpMessageDispatcher.handleMessage(findNodeResponse2);
+
+		StoreRequest storeRequest = (StoreRequest) storeRequestTag.getValue().getMessage();
+
+		StoreResponse storeResponse = new StoreResponseImpl(
+				(Context) node, contact, storeRequest.getMessageID(),
+				ImmutableSet.of(new StoreResponse.StoreStatusCode(
+						Keys.of("foo"), ((Context) node).getLocalNodeID(), 
+						StoreResponse.OK)));
+
+		httpMessageDispatcher.handleMessage(storeResponse);
+
+		assertEquals(1, storeResult.get().getValues().size());
+		assertEquals(Values.of("bar"),
+				storeResult.get().getValues().iterator().next().getValue());
+	}
+
+	@Test
+	public void testDHT() throws Exception {
+		final Context dht = (Context) MojitoFactory.createDHT("bootstrap");
+		final Context node = (Context) MojitoFactory.createDHT("node");
+
+		final InetSocketAddress dhtIp = new InetSocketAddress("localhost", 8080);
+		final InetSocketAddress nodeIp = new InetSocketAddress("localhost", 8081);
+		
+		final HttpMessageDispatcher httpMessageDispatcher = messageFactory(
+				dht);
+		
+		MessageDispatcherFactory messageFactory2 = control.createMock(
+				MessageDispatcherFactory.class);
+		Dispatcher messageDispatcher2 = control.createMock(
+				Dispatcher.class);
+		
+		final HttpMessageDispatcher httpMessageDispatcher2 = new HttpMessageDispatcher(
+				(Context) node, messageDispatcher2);
+		expect(messageFactory2.create(isA(Context.class))).andReturn(
+				httpMessageDispatcher2);
+		
+		messageDispatcher.bind(isA(SocketAddress.class));
+		messageDispatcher2.bind(isA(SocketAddress.class));
+
+		// All messages that gets submitted to the first dispatcher
+		// get directly pushed to the second dispatcher, and vice versa.
+		final Capture<Tag> tag = new Capture<Tag>();
+		expect(messageDispatcher.submit(capture(tag))).andAnswer(new IAnswer<Boolean>() {
+			@Override
+			public Boolean answer() throws Throwable {
+				DHTMessage source = tag.getValue().getMessage();
+				final ByteBuffer data = dht.getMessageFactory().writeMessage(nodeIp, source);
+
+				// the data gets transmitted over the wire.
+				node.getDHTExecutorService().execute(new Runnable() {
+					@Override
+					public void run() {
+						try {
+							DHTMessage destination = node.getMessageFactory()
+									.createMessage(dhtIp, data);
+							httpMessageDispatcher2.handleMessage(destination);
+						} catch (IOException e) {
+							e.printStackTrace();
+						}
+					}
+				});
+				
+				return true;
+			}
+		}).anyTimes();
+		
+		final Capture<Tag> tag2 = new Capture<Tag>();
+		expect(messageDispatcher2.submit(capture(tag2))).andAnswer(new IAnswer<Boolean>() {
+			@Override
+			public Boolean answer() throws Throwable {
+				DHTMessage source = tag2.getValue().getMessage();
+				final ByteBuffer data = node.getMessageFactory()
+						.writeMessage(dhtIp, source);
+				
+				// the data gets transmitted over the wire.
+				dht.getDHTExecutorService().execute(new Runnable() {
+					@Override
+					public void run() {
+						try {
+							DHTMessage destination = dht.getMessageFactory()
+									.createMessage(nodeIp, data);
+							httpMessageDispatcher.handleMessage(destination);
+						} catch (IOException e) {
+							e.printStackTrace();
+						}
+					}
+				});
+				return true;
+			}
+		}).anyTimes();
 		
 		control.replay();
 		
-	    node.setMessageDispatcher(messageFactory);
-	    InetSocketAddress local = new InetSocketAddress("localhost", 8081);
-	    node.bind(local);
-	    node.start();
-	    InetSocketAddress bootstrap = new InetSocketAddress("localhost", 8080);
-	    DHTFuture<BootstrapResult> result = node.bootstrap(bootstrap);
-	    
-	    // Allows the message executor to catch up.
-	    Thread.sleep(200);
+		dht.setMessageDispatcher(messageFactory);
+		dht.bind(dhtIp);
+		dht.start();
 
-	    PingRequest pingRequest = (PingRequest) pingRequestTag.getValue().getMessage();
+		node.setMessageDispatcher(messageFactory2);
+		node.bind(nodeIp);
+		node.start();
+		node.bootstrap(dhtIp).get();
+		assertTrue(node.isBootstrapped());
 
-	    Contact contact = new RemoteContact(
-	    		bootstrap,
-	    		Vendor.UNKNOWN, Version.ZERO, 
-	            KUID.createRandomID(),
-	            bootstrap, 
-	            1, 0, State.ALIVE);
-	    
-	    PingResponse pingResponse = new PingResponseImpl(
-	    		(Context) node, contact, pingRequest.getMessageID(), 
-	    		local, 
-	    		BigInteger.ONE);
+		DHTValueImpl value = new DHTValueImpl(
+				DHTValueType.TEXT, Version.ZERO, "hello world".getBytes());
 
-	    httpMessageDispatcher.handleMessage(pingResponse);
-	    
-	    Thread.sleep(200);
-	    
-	    FindNodeRequest findNodeRequest = (FindNodeRequest) findNodeRequestTag.getValue().getMessage();
-	    
-	    FindNodeResponse findNodeResponse = new FindNodeResponseImpl(
-	    		(Context) node, contact, findNodeRequest.getMessageID(), 
-	    		null, Collections.<Contact>emptySet());
+		node.put(Keys.of("key"), value).get();
 
-	    httpMessageDispatcher.handleMessage(findNodeResponse);
-	    
-	    Thread.sleep(200);
-	    
-	    assertEquals(ResultType.BOOTSTRAP_SUCCEEDED, result.get().getResultType());
-	    
-	    assertTrue(node.isBootstrapped());
-	    
-	    DHTFuture<StoreResult> storeResult = node.put(
-	    		Keys.of("foo"), Values.of("bar"));
-	    
-	    Thread.sleep(200);
-	    
-	    FindNodeRequest findNodeRequest2 = (FindNodeRequest) findNodeRequestTag2.getValue().getMessage();
-	    
-	    FindNodeResponse findNodeResponse2 = new FindNodeResponseImpl(
-	    		(Context) node, contact, findNodeRequest2.getMessageID(), 
-	    		null, Collections.<Contact>emptySet());
+		FindValueResult result = node.get(EntityKey.createEntityKey(
+				Keys.of("key"), DHTValueType.TEXT)).get();
 
-	    Thread.sleep(200);
+		assertTrue(result.isSuccess());
+		assertEquals(1, result.getEntities().size());
+		assertEquals("hello world",
+				new String(result.getEntities().iterator().next().getValue().getValue()));
 
-	    httpMessageDispatcher.handleMessage(findNodeResponse2);
-
-	    StoreRequest storeRequest = (StoreRequest) storeRequestTag.getValue().getMessage();
-
-	    StoreResponse storeResponse = new StoreResponseImpl(
-	    		(Context) node, contact, storeRequest.getMessageID(),
-	    		ImmutableSet.of(new StoreResponse.StoreStatusCode(
-	    				Keys.of("foo"), ((Context) node).getLocalNodeID(), 
-	    				StoreResponse.OK)));
-	    
-	    httpMessageDispatcher.handleMessage(storeResponse);
-	    
-	    assertEquals(1, storeResult.get().getValues().size());
-	    assertEquals(Values.of("bar"),
-	    		storeResult.get().getValues().iterator().next().getValue());
+		node.close();
+		dht.close();
 	}
 }
