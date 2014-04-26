@@ -90,67 +90,6 @@ public class MessageDispatcherTest {
 		ContactUtils.setNetworkInstanceUtils(new SimpleNetworkInstanceUtils(false));
 	}
 
-	interface Dispatcher {
-		public void bind(SocketAddress address) throws IOException;
-		boolean submit(Tag tag);
-		void verify(SecureMessage secureMessage, SecureMessageCallback smc);
-	}
-
-	static class HttpMessageDispatcher extends MessageDispatcher {
-		private boolean isBound = false;
-		private boolean started = false;
-		private final Dispatcher dispatcher;
-
-		public HttpMessageDispatcher(Context context, Dispatcher dispatcher) {
-			super(context);
-			this.dispatcher = dispatcher;
-		}
-
-		@Override
-		public void handleMessage(DHTMessage message) {
-			super.handleMessage(message);
-		}
-
-		@Override
-		public void bind(SocketAddress address) throws IOException {
-			dispatcher.bind(address);
-			isBound = true;
-		}
-
-		@Override
-		public boolean isBound() {
-			return isBound;
-		}
-
-		@Override
-		public boolean isRunning() {
-			return started;
-		}
-
-		@Override
-		protected boolean submit(Tag tag) {
-			register(tag);
-			return dispatcher.submit(tag);
-		}
-
-		@Override
-		public void start() {
-			super.start();
-			started = true;
-		}
-
-		@Override
-		protected void process(Runnable runnable) {
-			runnable.run();
-		}
-
-		@Override
-		protected void verify(SecureMessage secureMessage,
-				SecureMessageCallback smc) {
-			dispatcher.verify(secureMessage, smc);
-		}
-	}
-
 	private HttpMessageDispatcher messageFactory(MojitoDHT node) {
 		HttpMessageDispatcher httpMessageDispatcher = new HttpMessageDispatcher(
 				(Context) node, messageDispatcher);
@@ -363,110 +302,10 @@ public class MessageDispatcherTest {
 		dht.close();
 	}
 
-	private static class ByteArrayDispatcher implements Dispatcher {
-		private final Context context;
-		private final HttpClient client = new HttpClient();
-		private Server server;
-		private HttpMessageDispatcher dispatcher;
-
-		ByteArrayDispatcher(Context context) {
-			this.context = context;
-			client.setConnectorType(HttpClient.CONNECTOR_SELECT_CHANNEL);
-		}
-		
-		public ByteArrayDispatcher setDispatcher(HttpMessageDispatcher dispatcher) {
-			this.dispatcher = dispatcher;
-			return this;
-		}
-
-		@Override
-		public void bind(SocketAddress address) throws IOException {
-			server = new Server(((InetSocketAddress) address).getPort());
-
-			server.setHandler(new AbstractHandler() {
-				@Override
-				public void handle(String target, Request baseRequest,
-						HttpServletRequest request, HttpServletResponse response)
-						throws IOException, ServletException {
-					int length = request.getContentLength();
-					byte[] data = new byte[length];
-					DataInputStream dataIs = new DataInputStream(
-							request.getInputStream());
-					dataIs.readFully(data);
-
-					String ip = request.getHeader("X-Node-IP");
-					String port = request.getHeader("X-Node-Port");
-					InetSocketAddress src = new InetSocketAddress(ip,
-							Integer.valueOf(port)); 
-
-					DHTMessage destination = context.getMessageFactory()
-							.createMessage(src, ByteBuffer.wrap(data));
-					dispatcher.handleMessage(destination);
-				}
-			});
-						
-			try {
-				server.start();
-				client.start();
-			} catch (InterruptedException e) {
-				throw new IOException(e);
-			} catch (Exception e) {
-				throw new IOException(e);
-			}
-		}
-
-		@Override
-		public boolean submit(Tag tag) {
-			HttpExchange request = new HttpExchange() {
-			    protected void onResponseComplete() throws IOException {
-			        int status = getStatus();
-			        if (status == 200) {
-			        	
-			        }
-			    }
-			};
-			 
-			// Optionally set the HTTP method
-			request.setMethod("POST");
-			InetSocketAddress ip = (InetSocketAddress) tag.getMessage().getContact()
-					.getContactAddress();
-			request.setAddress(new Address(ip.getAddress().getHostAddress(),
-					ip.getPort()));
-			request.setURI("/");
-
-			// TODO(goto): figure out what's the best way to do this.
-			request.addRequestHeader("X-Node-IP",
-					((InetSocketAddress) context.getContactAddress()).getAddress().getHostAddress());
-			request.addRequestHeader("X-Node-Port",
-					String.valueOf(((InetSocketAddress) context.getContactAddress()).getPort()));
-			
-			try {
-				DHTMessage message = tag.getMessage();
-				ByteBuffer data = context.getMessageFactory()
-						.writeMessage(ip, message);
-				
-				request.setRequestContent(new ByteArrayBuffer(data.array()));
-
-				client.send(request);
-				return true;
-			} catch (IOException e) {
-				e.printStackTrace();
-				return false;
-			}
-		}
-
-		@Override
-		public void verify(SecureMessage secureMessage,
-				SecureMessageCallback smc) {
-			throw new UnsupportedOperationException(
-					"Dispatcher doesn't support verifying secure messages");
-		}
-	}
-
 	static class MessageDispatcherFactoryImpl implements MessageDispatcherFactory {
 		@Override
 		public MessageDispatcher create(Context context) {
-			ByteArrayDispatcher dispatcher = new ByteArrayDispatcher(context);
+			JettyMessageDispatcher dispatcher = new JettyMessageDispatcher(context);
 			HttpMessageDispatcher result = new HttpMessageDispatcher(context,
 					dispatcher);
 			dispatcher.setDispatcher(result);
