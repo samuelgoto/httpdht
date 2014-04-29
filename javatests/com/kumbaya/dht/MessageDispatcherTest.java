@@ -68,6 +68,7 @@ import org.limewire.security.SecureMessage;
 import org.limewire.security.SecureMessageCallback;
 
 import com.google.common.collect.ImmutableSet;
+import com.kumbaya.dht.JettyMessageDispatcher.InternalInetSocketAddress;
 
 import static org.easymock.EasyMock.capture;
 import static org.easymock.EasyMock.expect;
@@ -320,13 +321,13 @@ public class MessageDispatcherTest {
 		Context dht = (Context) MojitoFactory.createDHT("bootstrap");
 		Context node = (Context) MojitoFactory.createDHT("node");
 		dht.setMessageDispatcher(new MessageDispatcherFactoryImpl());
-		dht.bind(new InetSocketAddress("localhost", 8080));
+		dht.bind(new InternalInetSocketAddress("localhost", 8080, 8080));
 		dht.start();
 
 		node.setMessageDispatcher(new MessageDispatcherFactoryImpl());
-		node.bind(new InetSocketAddress("localhost", 8081));
+		node.bind(new InternalInetSocketAddress("localhost", 8081, 8081));
 		node.start();
-		node.bootstrap(new InetSocketAddress("localhost", 8080)).get();
+		node.bootstrap(new InternalInetSocketAddress("localhost", 8080, 8081)).get();
 		assertTrue(node.isBootstrapped());
 
 		DHTValueImpl value = new DHTValueImpl(

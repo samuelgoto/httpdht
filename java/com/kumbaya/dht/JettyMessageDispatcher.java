@@ -2,11 +2,13 @@ package com.kumbaya.dht;
 
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 
 import javax.servlet.ServletException;
+import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -14,10 +16,9 @@ import org.eclipse.jetty.client.Address;
 import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.client.HttpExchange;
 import org.eclipse.jetty.io.ByteArrayBuffer;
-import org.eclipse.jetty.server.Request;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.handler.AbstractHandler;
-import org.eclipse.jetty.server.handler.ContextHandler;
+import org.eclipse.jetty.servlet.ServletContextHandler;
+import org.eclipse.jetty.servlet.ServletHolder;
 import org.limewire.mojito.Context;
 import org.limewire.mojito.io.Tag;
 import org.limewire.mojito.messages.DHTMessage;
@@ -40,17 +41,19 @@ class JettyMessageDispatcher implements Dispatcher {
 		return this;
 	}
 
-	static class IndexHandler extends AbstractHandler {
+	static class IndexHandler extends HttpServlet {
+		private static final long serialVersionUID = 1L;
+
 		@Override
-		public void handle(String target, Request baseRequest,
-				HttpServletRequest request, HttpServletResponse response)
+		protected void doGet(HttpServletRequest request, HttpServletResponse response)
 				throws IOException, ServletException {
 			response.getWriter().write("Welcome to the DHT!");
 			response.flushBuffer();
 		}
 	}
 	
-	static class DhtHandler extends AbstractHandler {
+	static class DhtHandler extends HttpServlet {
+		private static final long serialVersionUID = 1L;
 		private final Context context;
 		private HttpMessageDispatcher dispatcher;
 
@@ -60,8 +63,14 @@ class JettyMessageDispatcher implements Dispatcher {
 		}
 		
 		@Override
-		public void handle(String target, Request baseRequest,
-				HttpServletRequest request, HttpServletResponse response)
+		protected void doGet(HttpServletRequest request, HttpServletResponse response)
+				throws IOException, ServletException {
+			response.getWriter().write("Welcome to the DHT entrypoint!");
+			response.flushBuffer();
+		}
+
+		@Override
+		protected void doPost(HttpServletRequest request, HttpServletResponse response)
 				throws IOException, ServletException {
 			int length = request.getContentLength();
 			byte[] data = new byte[length];
@@ -84,18 +93,16 @@ class JettyMessageDispatcher implements Dispatcher {
 	
 	@Override
 	public void bind(SocketAddress address) throws IOException {
-		server = new Server(((InetSocketAddress) address).getPort());
+		server = new Server(((InternalInetSocketAddress) address)
+				.getInternalPort());
 
-		ContextHandler servlet = new ContextHandler("/.well-known/dht");
+		ServletContextHandler servlet = new ServletContextHandler(ServletContextHandler.SESSIONS);
         servlet.setContextPath("/");
-        servlet.setResourceBase(".");
-        servlet.setClassLoader(Thread.currentThread().getContextClassLoader());
-        servlet.setHandler(new DhtHandler(context, dispatcher));
+        servlet.addServlet(new ServletHolder(new DhtHandler(context, dispatcher)),
+        		"/.well-known/dht");
+        servlet.addServlet(new ServletHolder(new IndexHandler()),
+        		"/");
         server.setHandler(servlet);
-
-		ContextHandler home = new ContextHandler("/");
-		home.setHandler(new IndexHandler());
-        server.setHandler(home);
 
 		try {
 			server.start();
@@ -153,5 +160,17 @@ class JettyMessageDispatcher implements Dispatcher {
 			SecureMessageCallback smc) {
 		throw new UnsupportedOperationException(
 				"Dispatcher doesn't support verifying secure messages");
+	}
+	
+	static class InternalInetSocketAddress extends InetSocketAddress {
+		private final int internalPort;
+		public InternalInetSocketAddress(String addr, int port, int internalPort) {
+			super(addr, port);
+			this.internalPort = internalPort;
+		}
+		
+		int getInternalPort() {
+			return internalPort;
+		}
 	}
 }
